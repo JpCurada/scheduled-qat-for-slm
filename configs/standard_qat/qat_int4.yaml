@@ -1,0 +1,45 @@
+method: standard_qat
+target_bits: 4
+
+model:
+  name: "HuggingFaceTB/SmolLM2-1.7B"
+  cache_dir: "models/base/"
+
+data:
+  train_dataset: "wikitext-103-raw-v1"
+  eval_dataset: "wikitext-103-raw-v1"
+  train_split: "train"
+  eval_split: "test"
+  seq_length: 2048
+
+training:
+  epochs: 3
+  batch_size: 8
+  gradient_accumulation_steps: 4   # effective batch size = 32
+  learning_rate: 5e-5
+  optimizer: adamw
+  weight_decay: 0.01
+  warmup_steps: 500
+  lr_scheduler: cosine
+
+quantize_config:
+  scheme: symmetric
+  granularity: per_channel
+  fake_quant_start_epoch: 0        # fake quantization applied from epoch 1
+  exclude_layers:
+    - lm_head
+    - embed_tokens
+
+evaluation:
+  primary_metrics: [perplexity, kl_divergence]
+  secondary_benchmarks: [mmlu, hellaswag, arc_challenge, piqa, gsm8k]
+  track_answer_flips: true
+
+export:
+  format: gguf
+  output_dir: "models/gguf/"
+
+logging:
+  save_every_steps: 5000
+  eval_every_steps: 2500
+  log_dir: "results/logs/standard_qat_int4/"

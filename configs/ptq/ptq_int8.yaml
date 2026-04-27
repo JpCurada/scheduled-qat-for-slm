@@ -1,0 +1,28 @@
+method: ptq
+target_bits: 8
+
+model:
+  name: "HuggingFaceTB/SmolLM2-1.7B"
+  cache_dir: "models/base/"
+
+calibration:
+  dataset: "wikitext-103-raw-v1"
+  split: "train"
+  num_samples: 128
+  seq_length: 2048
+
+quantize_config:
+  scheme: symmetric
+  granularity: per_channel
+  exclude_layers:
+    - lm_head
+    - embed_tokens
+
+evaluation:
+  primary_metrics: [perplexity, kl_divergence]
+  secondary_benchmarks: [mmlu, hellaswag, arc_challenge, piqa, gsm8k]
+  track_answer_flips: true
+
+export:
+  format: gguf
+  output_dir: "models/gguf/"

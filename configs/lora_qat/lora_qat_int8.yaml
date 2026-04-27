@@ -1,0 +1,58 @@
+method: lora_qat
+target_bits: 8
+
+model:
+  name: "HuggingFaceTB/SmolLM2-1.7B"
+  cache_dir: "models/base/"
+
+data:
+  train_dataset: "wikitext-103-raw-v1"
+  eval_dataset: "wikitext-103-raw-v1"
+  train_split: "train"
+  eval_split: "test"
+  seq_length: 2048
+
+training:
+  epochs: 2                        # fewer epochs — LoRA is lightweight
+  batch_size: 8
+  gradient_accumulation_steps: 4   # effective batch size = 32
+  learning_rate: 2e-4              # higher LR for LoRA adapters
+  optimizer: adamw
+  weight_decay: 0.01
+  warmup_steps: 250
+  lr_scheduler: cosine
+
+# Base model is quantized to target_bits and frozen; only LoRA adapters are trained.
+# Adapters target the attention projection layers (q, k, v, o).
+lora_config:
+  rank: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+  freeze_base: true                # base weights stay quantized & frozen throughout training
+
+quantize_config:
+  scheme: symmetric
+  granularity: per_channel
+  exclude_layers:
+    - lm_head
+    - embed_tokens
+
+evaluation:
+  primary_metrics: [perplexity, kl_divergence]
+  secondary_benchmarks: [mmlu, hellaswag, arc_challenge, piqa, gsm8k]
+  track_answer_flips: true
+
+export:
+  format: gguf
+  output_dir: "models/gguf/"
+  merge_lora: true                 # merge LoRA weights into base before GGUF export
+
+logging:
+  save_every_steps: 5000
+  eval_every_steps: 2500
+  log_dir: "results/logs/lora_qat_int8/"
