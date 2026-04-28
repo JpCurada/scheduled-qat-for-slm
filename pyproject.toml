@@ -1,0 +1,93 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "scheduled-qat-slm"
+version = "0.1.0"
+description = "Scheduled Quantization-Aware Training for Small Language Models (SmolLM2-1.7B)"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+keywords = ["quantization", "qat", "llm", "edge-ai", "gguf", "smollm"]
+
+# Core dependencies only — the minimum needed to run any experiment.
+# Heavy optional deps (lm-eval, llama-cpp-python, viz) are in [project.optional-dependencies].
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "datasets>=2.19.0",
+    "peft>=0.10.0",
+    "pyyaml>=6.0",
+    "numpy>=1.24.0",
+]
+
+[project.optional-dependencies]
+# Phase 3 evaluation: lm-evaluation-harness benchmarks (MMLU, HellaSwag, ARC, PIQA, GSM8K)
+eval = [
+    "lm-eval>=0.4.0",
+]
+
+# Phase 4 export: GGUF conversion via llama.cpp Python bindings
+export = [
+    "llama-cpp-python>=0.2.0",
+]
+
+# Result visualisation: comparison plots and tables in notebooks
+viz = [
+    "matplotlib>=3.7.0",
+    "plotly>=5.15.0",
+    "scipy>=1.10.0",
+]
+
+# Experiment tracking (optional, not required for core experiments)
+wandb = [
+    "wandb>=0.16.0",
+]
+
+# Install everything — useful on a fresh Colab/Kaggle instance
+all = [
+    "lm-eval>=0.4.0",
+    "llama-cpp-python>=0.2.0",
+    "matplotlib>=3.7.0",
+    "plotly>=5.15.0",
+    "scipy>=1.10.0",
+    "wandb>=0.16.0",
+]
+
+# CLI entry points — available after pip install as shell commands
+[project.scripts]
+sqat-train    = "src.training.trainer:main"
+sqat-baseline = "src.training.baseline:main"
+sqat-export   = "src.utils.export:main"
+sqat-metrics  = "src.utils.metrics:_cli_main"
+
+# ── Package discovery ────────────────────────────────────────────────────────
+# Find src/ and all subpackages (src.quantization, src.training, src.utils,
+# src.models) from the repo root. All have __init__.py so they are valid packages.
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["src*"]
+
+# ── Colab / Kaggle setup ─────────────────────────────────────────────────────
+#
+# Recommended workflow:
+#
+#   # 1. Clone the repo
+#   !git clone https://github.com/<user>/scheduled-qat-for-slm /content/sqat
+#
+#   # 2. Install the package (editable so configs/ is accessible by relative path)
+#   !pip install -e "/content/sqat[eval,viz]"
+#
+#   # 3. Change into the repo root so configs/ resolves correctly
+#   import os; os.chdir('/content/sqat')
+#
+#   # 4. Import and run
+#   from src.training.trainer import run_experiment
+#   results = run_experiment("configs/standard_qat/qat_int4.yaml", device_str="cuda")
+#
+# The -e (editable) flag is important: it keeps src/ and configs/ as live
+# references to the cloned directory instead of copying them to site-packages,
+# which means relative paths like "configs/ptq/ptq_int4.yaml" resolve correctly
+# after os.chdir('/content/sqat').
+#
+# For Kaggle, replace /content/sqat with /kaggle/working/sqat.
