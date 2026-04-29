@@ -284,6 +284,7 @@ def _run_training(
     ckpt_dir.mkdir(parents=True, exist_ok=True)
 
     step_log_path = log_dir / "training_steps.jsonl"
+    per_step_log_path = log_dir / "per_step_loss.jsonl"   # micro view: every optimizer step
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     global_step = 0
@@ -294,10 +295,12 @@ def _run_training(
     model.train()
     optimizer.zero_grad()
 
-    logger.info(
-        "Training: method=%s  epochs=%d  grad_accum=%d  batch=%d  effective_batch=%d",
-        method, total_epochs, grad_accum, tc.batch_size,
-        tc.batch_size * grad_accum,
+    # User-visible logs are routed through print() so they show up reliably in
+    # Colab/Kaggle notebook cells (some notebook frontends swallow logger output).
+    print(
+        f"Training: method={method}  epochs={total_epochs}  grad_accum={grad_accum}  "
+        f"batch={tc.batch_size}  effective_batch={tc.batch_size * grad_accum}",
+        flush=True,
     )
 
     for epoch in range(total_epochs):
@@ -306,7 +309,7 @@ def _run_training(
         if method == "standard_qat" and controller is not None:
             changed = controller.on_epoch_start(float(epoch))
             if changed:
-                logger.info("[epoch %d] %s", epoch, controller.describe())
+                print(f"[epoch {epoch}] {controller.describe()}", flush=True)
 
         epoch_loss_sum = 0.0
         epoch_micro_steps = 0
@@ -339,42 +342,44 @@ def _run_training(
                 optimizer.zero_grad()
                 global_step += 1
                 last_loss = loss.item() * grad_accum
+                lr = lr_scheduler.get_last_lr()[0]
+
+                # ---- Per-step loss log (micro view, every optimizer step) ----
+                _append_training_log(per_step_log_path, {
+                    "step": global_step,
+                    "epoch": epoch,
+                    "loss": last_loss,
+                    "lr": lr,
+                })
 
                 # ---- Scheduled QAT: step-level precision update ----
                 if method == "scheduled_qat" and controller is not None:
                     event = controller.on_step(global_step)
                     if event is not None:
-                        logger.info(
-                            "[step %d] schedule event: %s",
-                            global_step, event.describe(),
-                        )
+                        print(f"[step {global_step}] schedule event: {event.describe()}",
+                              flush=True)
 
                 # ---- Periodic step-level logging ----
                 if global_step % _LOG_EVERY_STEPS == 0:
-                    lr = lr_scheduler.get_last_lr()[0]
                     elapsed = time.time() - t_start
-                    logger.info(
-                        "[step %d | epoch %d/%d] loss=%.4f  lr=%.2e  elapsed=%.0fs",
-                        global_step, epoch + 1, total_epochs,
-                        last_loss, lr, elapsed,
+                    print(
+                        f"[step {global_step} | epoch {epoch + 1}/{total_epochs}] "
+                        f"loss={last_loss:.4f}  lr={lr:.2e}  elapsed={elapsed:.0f}s",
+                        flush=True,
                     )
 
                 # ---- Periodic validation perplexity ----
                 if eval_every > 0 and global_step % eval_every == 0:
                     val_ppl = compute_perplexity(model, val_loader, device)
                     model.train()
-                    lr = lr_scheduler.get_last_lr()[0]
-                    logger.info(
-                        "[step %d] val_ppl=%.4f", global_step, val_ppl,
-                    )
-                    entry = {
+                    print(f"[step {global_step}] val_ppl={val_ppl:.4f}", flush=True)
+                    _append_training_log(step_log_path, {
                         "step": global_step,
                         "epoch": epoch,
                         "loss": last_loss,
                         "val_ppl": val_ppl,
                         "lr": lr,
-                    }
-                    _append_training_log(step_log_path, entry)
+                    })
 
                 # ---- Periodic checkpoint ----
                 if save_every > 0 and global_step % save_every == 0:
@@ -389,14 +394,16 @@ def _run_training(
             global_step += 1
 
         avg_epoch_loss = epoch_loss_sum / max(epoch_micro_steps, 1)
-        logger.info(
-            "Epoch %d/%d complete: avg_loss=%.4f  global_step=%d",
-            epoch + 1, total_epochs, avg_epoch_loss, global_step,
+        print(
+            f"Epoch {epoch + 1}/{total_epochs} complete: "
+            f"avg_loss={avg_epoch_loss:.4f}  global_step={global_step}",
+            flush=True,
         )
 
-    logger.info(
-        "Training complete: %d optimizer steps  %.0fs elapsed",
-        global_step, time.time() - t_start,
+    print(
+        f"Training complete: {global_step} optimizer steps  "
+        f"{time.time() - t_start:.0f}s elapsed",
+        flush=True,
     )
     return global_step, last_loss
 
@@ -436,32 +443,32 @@ def _evaluate_model(
     """
     results: dict[str, Any] = {}
 
-    logger.info("Running evaluation ...")
+    print("Running evaluation ...", flush=True)
     ppl = compute_perplexity(model, eval_loader, device)
     results["perplexity"] = ppl
-    logger.info("Perplexity (WikiText-103 test): %.4f", ppl)
+    print(f"Perplexity (WikiText-103 test): {ppl:.4f}", flush=True)
 
     logits_path = Path(baseline_logits_path) if baseline_logits_path else Path(_DEFAULT_LOGITS_PATH)
     if logits_path.exists():
-        logger.info("Computing KL divergence vs FP32 baseline (%s) ...", logits_path)
+        print(f"Computing KL divergence vs FP32 baseline ({logits_path}) ...", flush=True)
         kld = compute_kl_divergence(
             model,
             device,
             baseline_logits_path=logits_path,
         )
         results["kl_divergence"] = kld
-        logger.info("KL divergence: %.6f", kld)
+        print(f"KL divergence: {kld:.6f}", flush=True)
     else:
-        logger.warning(
-            "FP32 baseline logits not found at %s. "
-            "Run baseline.py first to enable KL divergence. Skipping.",
-            logits_path,
+        print(
+            f"WARNING — FP32 baseline logits not found at {logits_path}. "
+            "Run notebook 01 first to enable KL divergence. Skipping.",
+            flush=True,
         )
 
     if run_benchmarks:
         tasks = config.evaluation.secondary_benchmarks if config.evaluation else None
         eval_out = output_dir or (Path("results") / config.experiment_name / "lm_eval")
-        logger.info("Running lm-evaluation-harness: tasks=%s", tasks)
+        print(f"Running lm-evaluation-harness: tasks={tasks}", flush=True)
         lm_results = run_lm_eval(
             model_path=config.model.name,
             output_path=eval_out,
@@ -470,7 +477,9 @@ def _evaluate_model(
         )
         results["lm_eval"] = lm_results
         for task, r in lm_results.items():
-            logger.info("  %-25s acc=%.4f +/- %.4f", task, r["acc"] or 0.0, r["acc_stderr"] or 0.0)
+            acc = r.get("acc") or 0.0
+            err = r.get("acc_stderr") or 0.0
+            print(f"  {task:25s} acc={acc:.4f} +/- {err:.4f}", flush=True)
 
     return results
 
@@ -549,9 +558,9 @@ def run_experiment(
     if device_str == "cuda" and not torch.cuda.is_available():
         logger.warning("CUDA not available — running on CPU (training will be very slow).")
 
-    logger.info("=" * 70)
-    logger.info("Experiment: %s  device=%s", config.experiment_name, device)
-    logger.info("=" * 70)
+    print("=" * 70, flush=True)
+    print(f"Experiment: {config.experiment_name}  device={device}", flush=True)
+    print("=" * 70, flush=True)
 
     method = config.method
 
@@ -569,7 +578,7 @@ def run_experiment(
             run_benchmarks=run_benchmarks,
         )
         out_path = _save_results(results, config, extra={"method": "ptq"})
-        logger.info("PTQ experiment complete -> %s", out_path)
+        print(f"PTQ experiment complete -> {out_path}", flush=True)
         return results
 
     # --------------------------------------------------------- QAT (training)
@@ -582,10 +591,10 @@ def run_experiment(
     steps_per_epoch = max(1, len(train_loader) // tc.gradient_accumulation_steps)
     total_steps = int(steps_per_epoch * tc.epochs)
 
-    logger.info(
-        "Steps: %d batches/epoch  %d accum  %d steps/epoch  %.1f epochs  = %d total steps",
-        len(train_loader), tc.gradient_accumulation_steps,
-        steps_per_epoch, tc.epochs, total_steps,
+    print(
+        f"Steps: {len(train_loader)} batches/epoch  {tc.gradient_accumulation_steps} accum  "
+        f"{steps_per_epoch} steps/epoch  {tc.epochs:.1f} epochs  = {total_steps} total steps",
+        flush=True,
     )
 
     # 3. Build model (dispatches to the right quantization builder).
