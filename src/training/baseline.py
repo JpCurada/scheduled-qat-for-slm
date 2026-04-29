@@ -90,7 +90,7 @@ def _build_test_loader(
     cache_dir: str,
     seq_length: int = 2048,
     batch_size: int = 4,
-    num_workers: int = 4,
+    num_workers: int = 2,
 ) -> DataLoader:
     """Load the WikiText-103 test split as a DataLoader.
 
@@ -130,7 +130,7 @@ def _build_train_loader_for_logits(
     seq_length: int = 2048,
     num_samples: int = 128,
     batch_size: int = 4,
-    num_workers: int = 4,
+    num_workers: int = 2,
 ) -> DataLoader:
     """Load a subset of the WikiText-103 training split for logit saving.
 

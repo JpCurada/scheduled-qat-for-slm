@@ -163,7 +163,7 @@ def _build_ptq_eval_loader(config: ExperimentConfig, batch_size: int = 4) -> Dat
         ds,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=2,
         pin_memory=True,
         drop_last=False,
     )

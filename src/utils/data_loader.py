@@ -169,7 +169,7 @@ def _load_and_chunk(
 
 def build_dataloaders(
     config: ExperimentConfig,
-    num_workers: int = 4,
+    num_workers: int = 2,
 ) -> tuple[DataLoader, DataLoader]:
     """Build train and eval DataLoaders for QAT / LoRA-QAT experiments.
 
@@ -231,7 +231,7 @@ def build_dataloaders(
 
 def build_validation_loader(
     config: ExperimentConfig,
-    num_workers: int = 4,
+    num_workers: int = 2,
 ) -> DataLoader:
     """Build a DataLoader for the WikiText-103 validation split.
 
@@ -275,7 +275,7 @@ def build_validation_loader(
 
 def build_calibration_loader(
     config: ExperimentConfig,
-    num_workers: int = 4,
+    num_workers: int = 2,
 ) -> DataLoader:
     """Build a DataLoader for PTQ calibration.
 
