@@ -71,7 +71,7 @@ logger = logging.getLogger(__name__)
 _GRAD_CLIP_NORM = 1.0
 
 # Log a training step summary every this many optimizer steps.
-_LOG_EVERY_STEPS = 100
+_LOG_EVERY_STEPS = 25
 
 # Default path where the baseline script saves FP32 logits.
 _DEFAULT_LOGITS_PATH = "results/baseline/fp32_logits.pt"
