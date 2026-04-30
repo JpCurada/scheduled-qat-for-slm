@@ -82,6 +82,10 @@ from src.quantization.scheduler import (
     build_scheduler,
     snap_bits,
 )
+from src.models.model_wrapper import (
+    maybe_enable_gradient_checkpointing,
+    resolve_compute_dtype,
+)
 from src.utils.config_loader import ExperimentConfig
 
 logger = logging.getLogger(__name__)
@@ -464,12 +468,13 @@ def build_scheduled_qat_model(
     exclude_layers = list(qc.exclude_layers) or list(DEFAULT_EXCLUDE_LAYERS)
     total_epochs = float(config.training.epochs)
 
-    # 1. Load pretrained FP32 model
-    logger.info("Loading %s ...", config.model.name)
+    # 1. Load pretrained model in the configured compute dtype
+    compute_dtype = resolve_compute_dtype(config)
+    logger.info("Loading %s (dtype=%s) ...", config.model.name, compute_dtype)
     model = AutoModelForCausalLM.from_pretrained(
         config.model.name,
         cache_dir=config.model.cache_dir,
-        torch_dtype=torch.float32,
+        torch_dtype=compute_dtype,
     )
     total_params = sum(p.numel() for p in model.parameters())
     logger.info("Model loaded: %d parameters", total_params)
@@ -495,6 +500,7 @@ def build_scheduled_qat_model(
 
     model.to(device)
     model.train()
+    maybe_enable_gradient_checkpointing(model, config)
 
     controller = ScheduledQATController(
         model=model,

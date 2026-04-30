@@ -136,23 +136,31 @@ def fake_quantize_tensor(
 
     q_max = _Q_MAX[bits]
 
+    # Compute scale in FP32 so that very small magnitudes do not underflow
+    # when the model weights are stored as FP16. The dequantized result is
+    # cast back to the input dtype at the end so the surrounding F.linear
+    # call still runs in the model's native dtype.
+    orig_dtype = x.dtype
+    x_fp32 = x.to(torch.float32) if orig_dtype != torch.float32 else x
+
     if per_channel:
         # Reduce over every dimension except the first (output-channel dimension).
         # keepdim=True so scale broadcasts correctly over in_features (and any
         # further dimensions for Conv weights, though SmolLM2 only has Linear).
-        reduce_dims = tuple(range(1, x.dim()))
-        scale = x.abs().amax(dim=reduce_dims, keepdim=True) / q_max
+        reduce_dims = tuple(range(1, x_fp32.dim()))
+        scale = x_fp32.abs().amax(dim=reduce_dims, keepdim=True) / q_max
     else:
-        scale = x.abs().amax() / q_max
+        scale = x_fp32.abs().amax() / q_max
 
     # Guard against zero-weight rows (e.g. freshly initialised layers where
     # a full row happens to be zero). Without the clamp, scale=0 causes NaN.
     scale = scale.clamp(min=1e-8)
 
-    x_scaled = x / scale
+    x_scaled = x_fp32 / scale
     x_rounded = _ste_round(x_scaled)                       # STE: gradient = 1
     x_clamped = x_rounded.clamp(-q_max, q_max)             # safety clamp
-    return x_clamped * scale
+    out = x_clamped * scale
+    return out.to(orig_dtype) if orig_dtype != torch.float32 else out
 
 
 # ---------------------------------------------------------------------------

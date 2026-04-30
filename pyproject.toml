@@ -44,6 +44,13 @@ wandb = [
     "wandb>=0.16.0",
 ]
 
+# Memory-efficient training: 8-bit AdamW (bitsandbytes) for fitting QAT of
+# SmolLM2-1.7B on a 14-16 GB T4. Optional — set training.use_8bit_optimizer=true
+# in the config to activate. Falls back to vanilla AdamW if not installed.
+mem = [
+    "bitsandbytes>=0.43.0",
+]
+
 # Install everything — useful on a fresh Colab/Kaggle instance
 all = [
     "lm-eval>=0.4.0",
@@ -52,6 +59,7 @@ all = [
     "plotly>=5.15.0",
     "scipy>=1.10.0",
     "wandb>=0.16.0",
+    "bitsandbytes>=0.43.0",
 ]
 
 # CLI entry points — available after pip install as shell commands

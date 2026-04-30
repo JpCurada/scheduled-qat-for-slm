@@ -381,14 +381,20 @@ def build_lora_model(
     qc = config.quantize_config
     per_channel = qc.granularity == "per_channel"
 
-    # 1. Load pretrained FP32 model
+    # 1. Load pretrained model in the configured compute dtype
+    from src.models.model_wrapper import (  # local import: avoid cycle at module load
+        maybe_enable_gradient_checkpointing,
+        resolve_compute_dtype,
+    )
+    compute_dtype = resolve_compute_dtype(config)
     logger.info(
-        "Loading %s from cache %s ...", config.model.name, config.model.cache_dir
+        "Loading %s from cache %s (dtype=%s) ...",
+        config.model.name, config.model.cache_dir, compute_dtype,
     )
     base_model = AutoModelForCausalLM.from_pretrained(
         config.model.name,
         cache_dir=config.model.cache_dir,
-        torch_dtype=torch.float32,
+        torch_dtype=compute_dtype,
     )
     logger.info(
         "Base model loaded: %d parameters",
@@ -423,6 +429,7 @@ def build_lora_model(
     # Move to training device after quantization (quantization runs on CPU)
     peft_model.to(device)
     peft_model.train()
+    maybe_enable_gradient_checkpointing(peft_model, config)
 
     # Build result summary
     param_count = count_parameters(peft_model)

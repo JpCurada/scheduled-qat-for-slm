@@ -72,6 +72,50 @@ _BYTES_PER_PARAM = {
     "int4": 0.5,
 }
 
+# Map config compute_dtype string -> torch dtype.
+_COMPUTE_DTYPE_MAP = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
+
+def resolve_compute_dtype(config: ExperimentConfig) -> torch.dtype:
+    """Resolve config.training.compute_dtype to a torch dtype.
+
+    Defaults to torch.float32 when training is None or the field is missing,
+    matching the legacy load behaviour. A string of "fp32" / "fp16" / "bf16"
+    selects float32, float16 or bfloat16 respectively.
+    """
+    if config.training is None:
+        return torch.float32
+    dtype_str = getattr(config.training, "compute_dtype", "fp32") or "fp32"
+    return _COMPUTE_DTYPE_MAP[dtype_str.lower()]
+
+
+def maybe_enable_gradient_checkpointing(model: nn.Module, config: ExperimentConfig) -> bool:
+    """Turn on HuggingFace gradient checkpointing if the config requested it.
+
+    Required when training a 1.7B model on a 14-16 GB T4: trades ~30% more
+    compute for ~40% less activation memory by recomputing the forward pass
+    of each transformer block during backward.
+
+    Disables HF's KV cache because it is incompatible with checkpointing
+    (HF would otherwise emit a warning every step).
+
+    Returns True iff checkpointing was activated, False otherwise.
+    """
+    if config.training is None or not getattr(config.training, "gradient_checkpointing", False):
+        return False
+    if not hasattr(model, "gradient_checkpointing_enable"):
+        logger.warning("gradient_checkpointing requested but model has no enable method")
+        return False
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    logger.info("Gradient checkpointing enabled (use_cache=False)")
+    return True
+
 
 # ---------------------------------------------------------------------------
 # Data classes

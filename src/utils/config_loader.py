@@ -78,6 +78,29 @@ class TrainingConfig:
     weight_decay: float
     warmup_steps: int
     lr_scheduler: str
+    # Memory-efficiency knobs (all default to off so existing configs and
+    # high-VRAM setups behave exactly as before).
+    #
+    # compute_dtype:           Dtype the model weights are loaded in. "fp32"
+    #                          (default) keeps the legacy behaviour; "fp16" or
+    #                          "bf16" halves weight + grad memory. The
+    #                          fake-quantize math runs in this dtype too — the
+    #                          STE handles either case correctly.
+    # use_amp:                 Wrap forward/backward in torch.cuda.amp.autocast
+    #                          and use a GradScaler for FP16. Has no effect on
+    #                          BF16 (autocast is fine but no scaler needed).
+    # use_8bit_optimizer:      Use bitsandbytes.optim.AdamW8bit. Cuts AdamW
+    #                          state from 2*params*4B to ~2*params*1B. Falls
+    #                          back to torch.optim.AdamW if bitsandbytes is
+    #                          not installed.
+    # gradient_checkpointing:  Call model.gradient_checkpointing_enable().
+    #                          Re-computes activations during backward to free
+    #                          activation memory, ~30% slower but ~40% less
+    #                          activation RAM.
+    compute_dtype: str = "fp32"
+    use_amp: bool = False
+    use_8bit_optimizer: bool = False
+    gradient_checkpointing: bool = False
 
 
 @dataclass
@@ -199,6 +222,11 @@ def _parse_calibration(raw: dict) -> CalibrationConfig:
 
 
 def _parse_training(raw: dict) -> TrainingConfig:
+    compute_dtype = str(raw.get("compute_dtype", "fp32")).lower()
+    if compute_dtype not in ("fp32", "fp16", "bf16"):
+        raise ValueError(
+            f"training.compute_dtype must be one of fp32, fp16, bf16; got {compute_dtype!r}"
+        )
     return TrainingConfig(
         epochs=float(raw["epochs"]),
         batch_size=int(raw["batch_size"]),
@@ -208,6 +236,10 @@ def _parse_training(raw: dict) -> TrainingConfig:
         weight_decay=float(raw["weight_decay"]),
         warmup_steps=int(raw["warmup_steps"]),
         lr_scheduler=raw["lr_scheduler"],
+        compute_dtype=compute_dtype,
+        use_amp=bool(raw.get("use_amp", False)),
+        use_8bit_optimizer=bool(raw.get("use_8bit_optimizer", False)),
+        gradient_checkpointing=bool(raw.get("gradient_checkpointing", False)),
     )
 
 

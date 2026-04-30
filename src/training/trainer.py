@@ -46,6 +46,7 @@ Usage
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import time
@@ -65,6 +66,35 @@ from src.utils.metrics import (
     run_lm_eval,
 )
 
+
+# Map config compute_dtype -> autocast dtype. fp32 disables autocast entirely.
+_AMP_DTYPE_MAP = {
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
+
+def _amp_settings(config: ExperimentConfig, device: torch.device) -> tuple[Optional[torch.dtype], bool]:
+    """Resolve (autocast_dtype, use_grad_scaler) from the training config.
+
+    Returns (None, False) when AMP is off or unsupported. GradScaler is only
+    needed for FP16 — BF16 has the FP32 dynamic range natively.
+    """
+    if config.training is None or not getattr(config.training, "use_amp", False):
+        return None, False
+    if device.type != "cuda":
+        # autocast on CPU is supported but doesn't help memory; skip for clarity.
+        logger.info("use_amp=True but device is %s; AMP disabled.", device.type)
+        return None, False
+    dtype_str = getattr(config.training, "compute_dtype", "fp32").lower()
+    amp_dtype = _AMP_DTYPE_MAP.get(dtype_str)
+    if amp_dtype is None:
+        logger.info(
+            "use_amp=True but compute_dtype=%s; autocast skipped.", dtype_str,
+        )
+        return None, False
+    return amp_dtype, amp_dtype is torch.float16
+
 logger = logging.getLogger(__name__)
 
 # Gradient clipping max norm — standard for LLM fine-tuning.
@@ -82,7 +112,14 @@ _DEFAULT_LOGITS_PATH = "results/baseline/fp32_logits.pt"
 # ---------------------------------------------------------------------------
 
 def _build_optimizer(model: nn.Module, config: ExperimentConfig) -> torch.optim.Optimizer:
-    """Build AdamW over all parameters that require gradients."""
+    """Build AdamW over all parameters that require gradients.
+
+    If training.use_8bit_optimizer is True, uses bitsandbytes.optim.AdamW8bit
+    which keeps the (m, v) optimizer state in INT8 — cuts AdamW memory from
+    ~13 GB to ~3 GB for SmolLM2-1.7B and is what makes QAT fit on a T4.
+    Falls back to vanilla AdamW with a warning if bitsandbytes is not
+    importable, so the trainer never crashes on missing optional deps.
+    """
     tc = config.training
     trainable = [p for p in model.parameters() if p.requires_grad]
     if not trainable:
@@ -90,6 +127,27 @@ def _build_optimizer(model: nn.Module, config: ExperimentConfig) -> torch.optim.
             "No trainable parameters found. "
             "Check that the model and LoRA config are set up correctly."
         )
+
+    if getattr(tc, "use_8bit_optimizer", False):
+        try:
+            import bitsandbytes as bnb  # type: ignore[import]
+            opt = bnb.optim.AdamW8bit(
+                trainable,
+                lr=tc.learning_rate,
+                weight_decay=tc.weight_decay,
+            )
+            logger.info(
+                "Optimizer: AdamW8bit (bitsandbytes)  lr=%g  weight_decay=%g  trainable_params=%d",
+                tc.learning_rate, tc.weight_decay, sum(p.numel() for p in trainable),
+            )
+            return opt
+        except ImportError:
+            logger.warning(
+                "use_8bit_optimizer=True but bitsandbytes is not installed. "
+                "Falling back to torch.optim.AdamW. "
+                "Install with: pip install bitsandbytes",
+            )
+
     logger.info("Optimizer: AdamW  lr=%g  weight_decay=%g  trainable_params=%d",
                 tc.learning_rate, tc.weight_decay, sum(p.numel() for p in trainable))
     return torch.optim.AdamW(
@@ -292,6 +350,16 @@ def _run_training(
     last_loss = 0.0
     t_start = time.time()
 
+    # AMP setup — autocast wraps the forward pass; GradScaler is only used
+    # for FP16 (BF16 keeps the FP32 dynamic range so no scaling is needed).
+    amp_dtype, use_grad_scaler = _amp_settings(config, device)
+    scaler = torch.amp.GradScaler(device.type, enabled=use_grad_scaler)
+
+    def _autocast_ctx():
+        if amp_dtype is None:
+            return contextlib.nullcontext()
+        return torch.autocast(device_type=device.type, dtype=amp_dtype)
+
     model.train()
     optimizer.zero_grad()
 
@@ -299,7 +367,8 @@ def _run_training(
     # Colab/Kaggle notebook cells (some notebook frontends swallow logger output).
     print(
         f"Training: method={method}  epochs={total_epochs}  grad_accum={grad_accum}  "
-        f"batch={tc.batch_size}  effective_batch={tc.batch_size * grad_accum}",
+        f"batch={tc.batch_size}  effective_batch={tc.batch_size * grad_accum}  "
+        f"amp={amp_dtype}  scaler={use_grad_scaler}",
         flush=True,
     )
 
@@ -319,15 +388,17 @@ def _run_training(
             attention_mask = batch["attention_mask"].to(device)
             labels = batch["labels"].to(device)
 
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels,
-            )
-            # Divide loss by grad_accum before backward so accumulated gradients
-            # are equivalent to a single forward on the full effective batch.
-            loss = outputs.loss / grad_accum
-            loss.backward()
+            with _autocast_ctx():
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels,
+                )
+                # Divide loss by grad_accum before backward so accumulated gradients
+                # are equivalent to a single forward on the full effective batch.
+                loss = outputs.loss / grad_accum
+
+            scaler.scale(loss).backward()
 
             micro_step += 1
             epoch_micro_steps += 1
@@ -336,8 +407,12 @@ def _run_training(
             is_accumulation_step = micro_step % grad_accum == 0
 
             if is_accumulation_step:
+                # Unscale before clipping so the clip threshold is applied to
+                # real gradients, not the scaled ones. No-op when scaler disabled.
+                scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=_GRAD_CLIP_NORM)
-                optimizer.step()
+                scaler.step(optimizer)
+                scaler.update()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
@@ -387,8 +462,10 @@ def _run_training(
 
         # ---- Flush any partial accumulation at end of epoch ----
         if micro_step % grad_accum != 0:
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=_GRAD_CLIP_NORM)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             lr_scheduler.step()
             optimizer.zero_grad()
             global_step += 1
