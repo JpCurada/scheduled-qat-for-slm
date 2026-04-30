@@ -77,23 +77,44 @@ _AMP_DTYPE_MAP = {
 def _amp_settings(config: ExperimentConfig, device: torch.device) -> tuple[Optional[torch.dtype], bool]:
     """Resolve (autocast_dtype, use_grad_scaler) from the training config.
 
-    Returns (None, False) when AMP is off or unsupported. GradScaler is only
-    needed for FP16 — BF16 has the FP32 dynamic range natively.
+    Two valid mixed-precision recipes are supported:
+
+    1. FP32 master weights + FP16 autocast + GradScaler
+       (compute_dtype="fp32", use_amp=True). Standard PyTorch AMP. Gradients
+       are FP32, scaler.unscale_ works correctly. Highest memory of the two.
+
+    2. Low-precision weights (BF16 or FP16), autocast as a no-op
+       (compute_dtype="bf16" or "fp16", use_amp ignored for scaler purposes).
+       Weights, activations and gradients all live in the configured dtype.
+       No GradScaler — it would reject the non-FP32 gradients with
+       "Attempting to unscale FP16 gradients". BF16's wide dynamic range
+       removes the need for loss scaling; pure FP16 weight training is
+       supported but riskier (loss can go to NaN without scaling).
+
+    Returns (autocast_dtype, use_grad_scaler). Either may be None/False.
     """
-    if config.training is None or not getattr(config.training, "use_amp", False):
+    if config.training is None:
         return None, False
+    tc = config.training
     if device.type != "cuda":
-        # autocast on CPU is supported but doesn't help memory; skip for clarity.
-        logger.info("use_amp=True but device is %s; AMP disabled.", device.type)
+        if getattr(tc, "use_amp", False):
+            logger.info("use_amp=True but device is %s; AMP disabled.", device.type)
         return None, False
-    dtype_str = getattr(config.training, "compute_dtype", "fp32").lower()
-    amp_dtype = _AMP_DTYPE_MAP.get(dtype_str)
-    if amp_dtype is None:
-        logger.info(
-            "use_amp=True but compute_dtype=%s; autocast skipped.", dtype_str,
-        )
+
+    weight_dtype_str = getattr(tc, "compute_dtype", "fp32").lower()
+    weight_dtype = _AMP_DTYPE_MAP.get(weight_dtype_str)  # None when fp32
+
+    # Recipe 2: weights are already low-precision. Autocast becomes a no-op
+    # (or is skipped entirely) and GradScaler is incompatible with non-FP32
+    # gradients, so we disable it.
+    if weight_dtype is not None:
+        return weight_dtype, False
+
+    # Recipe 1: FP32 weights. Autocast only kicks in when use_amp=True; the
+    # default amp_dtype is FP16, which needs the scaler.
+    if not getattr(tc, "use_amp", False):
         return None, False
-    return amp_dtype, amp_dtype is torch.float16
+    return torch.float16, True
 
 logger = logging.getLogger(__name__)
 
