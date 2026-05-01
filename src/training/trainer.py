@@ -373,8 +373,10 @@ def _run_training(
 
     # AMP setup — autocast wraps the forward pass; GradScaler is only used
     # for FP16 (BF16 keeps the FP32 dynamic range so no scaling is needed).
+    # On XLA (Kaggle TPU), torch.amp.GradScaler is not compatible; skip it entirely.
     amp_dtype, use_grad_scaler = _amp_settings(config, device)
-    scaler = torch.amp.GradScaler(device.type, enabled=use_grad_scaler)
+    is_xla = device.type == "xla"
+    scaler = None if is_xla else torch.amp.GradScaler(device.type, enabled=use_grad_scaler)
 
     def _autocast_ctx():
         if amp_dtype is None:
@@ -419,7 +421,10 @@ def _run_training(
                 # are equivalent to a single forward on the full effective batch.
                 loss = outputs.loss / grad_accum
 
-            scaler.scale(loss).backward()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
 
             micro_step += 1
             epoch_micro_steps += 1
@@ -429,11 +434,15 @@ def _run_training(
 
             if is_accumulation_step:
                 # Unscale before clipping so the clip threshold is applied to
-                # real gradients, not the scaled ones. No-op when scaler disabled.
-                scaler.unscale_(optimizer)
+                # real gradients, not the scaled ones. No-op when scaler is None.
+                if scaler is not None:
+                    scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=_GRAD_CLIP_NORM)
-                scaler.step(optimizer)
-                scaler.update()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
                 global_step += 1
@@ -483,10 +492,14 @@ def _run_training(
 
         # ---- Flush any partial accumulation at end of epoch ----
         if micro_step % grad_accum != 0:
-            scaler.unscale_(optimizer)
+            if scaler is not None:
+                scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=_GRAD_CLIP_NORM)
-            scaler.step(optimizer)
-            scaler.update()
+            if scaler is not None:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
             global_step += 1
